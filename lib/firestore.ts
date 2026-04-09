@@ -190,6 +190,29 @@ export async function createFirestoreDocument(collection: string, data: Firestor
   };
 }
 
+export async function setFirestoreDocument(collection: string, id: string, data: FirestoreDocumentData) {
+  const response = await firestoreFetch(`/${collection}/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      fields: encodeFields(data),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to set Firestore document: ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    name: string;
+    fields?: Record<string, Record<string, unknown>>;
+  };
+
+  return {
+    id: payload.name.split('/').pop() ?? '',
+    data: decodeFields(payload.fields),
+  };
+}
+
 export async function updateFirestoreDocument(collection: string, id: string, data: FirestoreDocumentData) {
   const params = new URLSearchParams();
 

@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
-  createFirestoreDocument,
   listFirestoreDocuments,
   updateFirestoreDocument,
 } from '@/lib/firestore';
+import { processRadarFeeds } from '@/lib/radar-feed-processor';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -36,64 +36,8 @@ type RadarRecord = {
   ideaFuerte?: string;
   pilar?: string;
   status?: ArticleStatus;
-  updatedAt?: string;
+  dedupeKey?: string;
 };
-
-interface RssItem {
-  title: string;
-  link: string;
-  description: string;
-  pubDate: string;
-}
-
-function simulateRssParse(sourceUrl: string): RssItem[] {
-  return [
-    {
-      title: 'FinOps 2.0: Real-Time Cloud Cost Attribution at Scale',
-      link: `${sourceUrl}/finops-2-cost-attribution`,
-      description:
-        'Strategies for attributing cloud spend to individual features using eBPF-level telemetry and Kubernetes labels.',
-      pubDate: new Date(Date.now() - 3 * 3600000).toISOString(),
-    },
-    {
-      title: 'Zero Trust Architecture in Multi-Tenant Kubernetes: Lessons from Production',
-      link: `${sourceUrl}/zero-trust-k8s-production`,
-      description:
-        'Battle-tested patterns for implementing zero trust between workloads in shared cluster environments.',
-      pubDate: new Date(Date.now() - 6 * 3600000).toISOString(),
-    },
-  ];
-}
-
-function simulateScore(item: RssItem) {
-  const scoreBreakdown: ScoreBreakdown = {
-    novedad: Math.floor(Math.random() * 2) + 3,
-    relevancia_estrategica: Math.floor(Math.random() * 2) + 3,
-    impacto_ejecutivo: Math.floor(Math.random() * 2) + 3,
-    aplicabilidad_enterprise: Math.floor(Math.random() * 2) + 3,
-    potencial_editorial: Math.floor(Math.random() * 2) + 2,
-  };
-
-  const scoreTotal = Object.values(scoreBreakdown).reduce((sum, value) => sum + value, 0);
-  const isFinOps = item.title.toLowerCase().includes('finops');
-
-  return {
-    titulo: item.title,
-    url: item.link,
-    publishedAt: item.pubDate,
-    fetchedAt: new Date().toISOString(),
-    scoreTotal,
-    scoreBreakdown,
-    porQueImporta: isFinOps
-      ? 'La atribución de costes en tiempo real convierte FinOps en una palanca de decisión ejecutiva y no solo en revisión financiera a posteriori.'
-      : 'El aislamiento lateral entre workloads es un problema estratégico de riesgo, resiliencia y gobierno en estates complejos.',
-    ideaFuerte: isFinOps
-      ? 'Instrumentar por workload y feature permite ligar coste marginal a decisiones de producto y plataforma.'
-      : 'Identity-based security, policy-as-code y observabilidad de malla forman una base operable para Zero Trust en Kubernetes.',
-    pilar: isFinOps ? 'Hybrid Cloud y Public Cloud con criterio' : 'Resiliencia, observabilidad y AIOps',
-    status: 'pending' as ArticleStatus,
-  };
-}
 
 function toArticleResponse(id: string, data: RadarRecord, source?: SourceRecord) {
   const metrics: ScoreBreakdown = {
@@ -125,6 +69,10 @@ async function getSourceIndex() {
   return new Map(sourceDocs.map((document) => [document.id, document.data as SourceRecord]));
 }
 
+function buildRadarDedupeKey(data: RadarRecord) {
+  return [data.fuenteId ?? 'unknown', data.url ?? data.titulo ?? 'untitled', data.publishedAt ?? 'no-date'].join('|');
+}
+
 export async function GET() {
   try {
     const [radarDocs, sourceIndex] = await Promise.all([
@@ -132,14 +80,26 @@ export async function GET() {
       getSourceIndex(),
     ]);
 
-    const articles = radarDocs
-      .map((document) => {
-        const radar = document.data as RadarRecord;
-        const source = radar.fuenteId ? sourceIndex.get(radar.fuenteId) : undefined;
-        return toArticleResponse(document.id, radar, source);
-      })
-      .filter((article) => article.total_score >= 15 && article.status !== 'discarded')
-      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    const deduped = new Map<string, ReturnType<typeof toArticleResponse>>();
+
+    for (const document of radarDocs) {
+      const radar = document.data as RadarRecord;
+      const source = radar.fuenteId ? sourceIndex.get(radar.fuenteId) : undefined;
+      const article = toArticleResponse(document.id, radar, source);
+
+      if (article.total_score < 15 || article.status === 'discarded') {
+        continue;
+      }
+
+      const dedupeKey = buildRadarDedupeKey(radar);
+      const existing = deduped.get(dedupeKey);
+
+      if (!existing || article.created_at > existing.created_at) {
+        deduped.set(dedupeKey, article);
+      }
+    }
+
+    const articles = Array.from(deduped.values()).sort((a, b) => b.created_at.localeCompare(a.created_at));
 
     return NextResponse.json({ articles });
   } catch (error) {
@@ -150,36 +110,11 @@ export async function GET() {
 
 export async function POST() {
   try {
-    const sourceDocs = await listFirestoreDocuments('fuentes');
-    const activeSources = sourceDocs.filter((document) => (document.data as SourceRecord).activa === true);
-
-    if (activeSources.length === 0) {
-      return NextResponse.json({ message: 'No active sources found', processed: 0 });
-    }
-
-    const results = [] as RadarRecord[];
-
-    for (const source of activeSources) {
-      const sourceData = source.data as SourceRecord;
-      const items = simulateRssParse(sourceData.urlFeed ?? 'https://example.com/feed');
-
-      for (const item of items) {
-        const scored = simulateScore(item);
-        if (scored.scoreTotal >= 15) {
-          const document = {
-            ...scored,
-            fuenteId: source.id,
-          };
-
-          results.push(document);
-          await createFirestoreDocument('radar_diario', document);
-        }
-      }
-    }
+    const stats = await processRadarFeeds();
 
     return NextResponse.json({
-      message: `Processed ${activeSources.length} sources, inserted ${results.length} signals`,
-      processed: results.length,
+      ok: true,
+      stats,
     });
   } catch (error) {
     console.error('Radar POST error:', error);
