@@ -103,7 +103,7 @@ function decodeFields(fields?: Record<string, Record<string, unknown>>) {
 
 async function firestoreFetch(path: string, init?: RequestInit) {
   const accessToken = await getAccessToken();
-  const response = await fetch(`${getDocumentsBaseUrl()}${path}`, {
+  return fetch(`${getDocumentsBaseUrl()}${path}`, {
     ...init,
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -112,8 +112,6 @@ async function firestoreFetch(path: string, init?: RequestInit) {
     },
     cache: 'no-store',
   });
-
-  return response;
 }
 
 export async function listFirestoreDocuments(collection: string) {
@@ -150,6 +148,35 @@ export async function createFirestoreDocument(collection: string, data: Firestor
 
   if (!response.ok) {
     throw new Error(`Failed to create Firestore document: ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    name: string;
+    fields?: Record<string, Record<string, unknown>>;
+  };
+
+  return {
+    id: payload.name.split('/').pop() ?? '',
+    data: decodeFields(payload.fields),
+  };
+}
+
+export async function updateFirestoreDocument(collection: string, id: string, data: FirestoreDocumentData) {
+  const params = new URLSearchParams();
+
+  Object.keys(data).forEach((fieldPath) => {
+    params.append('updateMask.fieldPaths', fieldPath);
+  });
+
+  const response = await firestoreFetch(`/${collection}/${id}?${params.toString()}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      fields: encodeFields(data),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to update Firestore document: ${response.status}`);
   }
 
   const payload = (await response.json()) as {
