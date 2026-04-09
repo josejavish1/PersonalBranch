@@ -63,7 +63,7 @@ export function RadarClient({ initialArticles }: RadarClientProps) {
       }
 
       if (status === 'saved' && payload.article) {
-        setArticles((prev) => prev.map((article) => (article.id === id ? payload.article as Article : article)));
+        setArticles((prev) => prev.map((article) => (article.id === id ? (payload.article as Article) : article)));
       }
     } catch (err) {
       setArticles(previousArticles);
@@ -145,10 +145,18 @@ export function RadarClient({ initialArticles }: RadarClientProps) {
           <button
             key={key}
             onClick={() => setFilterStatus(key)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${{filterStatus === key ? 'bg-card text-foreground shadow-sm border border-border/60' : 'text-muted-foreground hover:text-foreground'}}`}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+              filterStatus === key
+                ? 'bg-card text-foreground shadow-sm border border-border/60'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
           >
             {label}
-            <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${{filterStatus === key ? 'bg-primary/15 text-primary' : 'bg-secondary text-muted-foreground'}}`}>
+            <span
+              className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${
+                filterStatus === key ? 'bg-primary/15 text-primary' : 'bg-secondary text-muted-foreground'
+              }`}
+            >
               {count}
             </span>
           </button>
@@ -167,7 +175,9 @@ export function RadarClient({ initialArticles }: RadarClientProps) {
           </div>
           <p className="text-sm font-medium text-foreground mb-1">Sin señales en esta vista</p>
           <p className="text-xs text-muted-foreground max-w-xs">
-            {filterStatus === 'pending' ? 'Procesa los feeds para generar nuevas señales o revisa los guardados.' : 'No hay artículos en esta categoría todavía.'}
+            {filterStatus === 'pending'
+              ? 'Procesa los feeds para generar nuevas señales o revisa los guardados.'
+              : 'No hay artículos en esta categoría todavía.'}
           </p>
         </div>
       ) : (
