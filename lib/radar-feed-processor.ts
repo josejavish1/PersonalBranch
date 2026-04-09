@@ -189,7 +189,7 @@ function detectThemes(text: string) {
   return themes;
 }
 
-function scoreFeedItem(item: ParsedFeedItem) {
+function scoreFeedItemRuleBased(item: ParsedFeedItem): RadarScore {
   const title = item.title.toLowerCase();
   const description = item.description.toLowerCase();
   const text = `${title} ${description}`;
@@ -221,7 +221,7 @@ function scoreFeedItem(item: ParsedFeedItem) {
     : 'La señal se puede traducir en una conversación ejecutiva sobre operabilidad, coste y resiliencia.';
 
   if (themes.includes('finops')) {
-    porQueImporta = `“${hook}” toca una palanca ejecutiva de coste cloud, accountability y priorización de capacidad.`;
+    porQueImporta = `“${hook}” toca una palancha ejecutiva de coste cloud, accountability y priorización de capacidad.`
     ideaFuerte = context
       ? `La oportunidad está en convertir ${lowerFirst(context)} en una disciplina operable de FinOps y gobierno.`
       : 'Coste marginal, ownership y decisiones de plataforma deben quedar conectados en el operating model.';
@@ -259,6 +259,178 @@ function scoreFeedItem(item: ParsedFeedItem) {
     ideaFuerte,
     pilar,
   };
+}
+
+function extractArticleText(html: string) {
+  const articleMatch = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i);
+  const mainMatch = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i);
+  const bodyMatch = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
+
+  const candidate = articleMatch?.[1] || mainMatch?.[1] || bodyMatch?.[1] || html;
+  const withoutNoise = candidate
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, ' ')
+    .replace(/<img\b[^>]*>/gi, ' ');
+
+  return truncateWords(normalizeWhitespace(withoutNoise), 1800);
+}
+
+async function fetchArticleForAnalysis(url: string) {
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'user-agent': 'Executive-AI-Radar/0.1 (+https://firebase.google.com)',
+        accept: 'text/html,application/xhtml+xml, application/xml;q=0.9,*/*;q=0.8',
+      },
+      cache: 'no-store',
+    });
+
+    if (!response.ok) {
+      return '';
+    }
+
+    const html = await response.text();
+    return extractArticleText(html);
+  } catch {
+    return '';
+  }
+}
+
+function parseGeminiScore(raw: unknown, fallback: number) {
+  const value = typeof raw === 'number' ? raw : Number(raw);
+  if (Number.isNaN(value)) return fallback;
+  return Math.max(1, Math.min(5, Math.round(value)));
+}
+
+async function analyzeWithGemini(item: ParsedFeedItem, articleUrl: string): Promise<RadarScore | null> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return null;
+  }
+
+  const articleText = await fetchArticleForAnalysis(articleUrl);
+  const prompt = [
+    'Eres un analista editorial para Executive AI Radar.',
+    'Evalúa la señal para una audiencia de directivos técnicos de infraestructura enterprise.',
+    'Debes priorizar operating model, rinesgo, resiliencia, coste, soberanía, platform engineering y transformación de infraestructuras.',
+    'Descarta hype técnico sin implicación ejecutiva real.',
+    '',
+    `Título: ${item.title}`,
+    `Descripción RSS: ${item.description || 'N/A'}`,
+    `URL: ${articleUrl}`,
+    '',
+    'Texto del artículo:',
+    articleText || 'No se pudo recuperar el artículo completo; analiza con el contexto disponible.',
+  ].join('\n');
+
+  const schema = {
+    type: 'object',
+    properties: {
+      pilar: {
+        type: 'string',
+        enum: [
+          'Diseño y modernización de infraestructuras enterprise y private cloud',
+          'Hybrid Cloud y Public Cloud con criterio',
+          'Platform Engineering e Internal Developer Platforms',
+          'Resiliencia, observabilidad y AIOps',
+        ],
+      },
+      porQueImporta: { type: 'string' },
+      ideaFuerte: { type: 'string' },
+      scoreBreakdown: {
+        type: 'object',
+        properties: {
+          novedad: { type: 'integer', minimum: 1, maximum: 5 },
+          relevancia_estrategica: { type: 'integer', minimum: 1, maximum: 5 },
+          impacto_ejecutivo: { type: 'integer', minimum: 1, maximum: 5 },
+          aplicabilidad_enterprise: { type: 'integer', minimum: 1, maximum: 5 },
+          potencial_editorial: { type: 'integer', minimum: 1, maximum: 5 },
+        },
+        required: [
+          'novedad',
+          'relevancia_estrategica',
+          'impacto_ejecutivo',
+          'aplicabilidad_enterprise',
+          'potencial_editorial',
+        ],
+      },
+    },
+    required: ['pilar', 'porQueImporta', 'ideaFuerte', 'scoreBreakdown'],
+  };
+
+  try {
+    const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
+      },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: schema,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = (await response.json()) as {
+      candidates?: Array<{
+        content?: {
+          parts?: Array<{
+            text?: string;
+          }>;
+        };
+      }>;
+    };
+
+    const rawText = payload.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!rawText) {
+      return null;
+    }
+
+    const parsed = JSON.parse(rawText) as {
+      pilar?: string;
+      porQueImporta?: string;
+      ideaFuerte?: string;
+      scoreBreakdown?: Record<string, unknown>;
+    };
+
+    const scoreBreakdown = {
+      novedad: parseGeminiScore(parsed.scoreBreakdown?.novedad, 3),
+      relevancia_estrategica: parseGeminiScore(parsed.scoreBreakdown?.relevancia_estrategica, 3),
+      impacto_ejecutivo: parseGeminiScore(parsed.scoreBreakdown?.impacto_ejecutivo, 3),
+      aplicabilidad_enterprise: parseGeminiScore(parsed.scoreBreakdown?.aplicabilidad_enterprise, 3),
+      potencial_editorial: parseGeminiScore(parsed.scoreBreakdown?.potencial_editorial, 3),
+    };
+
+    return {
+      scoreBreakdown,
+      scoreTotal: Object.values(scoreBreakdown).reduce((sum, value) => sum + value, 0),
+      porQueImporta: truncateWords(parsed.porQueImporta || '', 45) || scoreFeedItemRuleBased(item).porQueImporta,
+      ideaFuerte: truncateWords(parsed.ideaFuerte || '', 35) || scoreFeedItemRuleBased(item).ideaFuerte,
+      pilar:
+        parsed.pilar ||
+        'Diseño y modernización de infraestructuras enterprise y private cloud',
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function scoreFeedItem(item: ParsedFeedItem, articleUrl: string): Promise<RadarScore> {
+  const geminiScore = await analyzeWithGemini(item, articleUrl);
+  if (geminiScore) {
+    return geminiScore;
+  }
+
+  return scoreFeedItemRuleBased(item);
 }
 
 function buildStoryId(title: string, canonicalUrl: string | null, publishedAt: string) {
@@ -329,7 +501,7 @@ async function processSingleSource(
       stats.rawItemsInserted += 1;
     }
 
-    const scored = scoreFeedItem(item);
+    const scored = await scoreFeedItem(item, canonicalUrl);
     if (scored.scoreTotal < 15) {
       continue;
     }
