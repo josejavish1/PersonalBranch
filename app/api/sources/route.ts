@@ -10,6 +10,7 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 type SourceTier = 'tier1' | 'tier2';
+type SourceType = 'rss' | 'web';
 
 interface FirestoreSource {
   nombre: string;
@@ -18,6 +19,7 @@ interface FirestoreSource {
   activa: boolean;
   pilar: string | null;
   peso: number;
+  sourceType?: SourceType;
   lastFetchedAt: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
@@ -27,13 +29,29 @@ function toIsoString(value?: string | null) {
   return value ?? new Date(0).toISOString();
 }
 
+function inferSourceType(url: string): SourceType {
+  const normalized = url.trim().toLowerCase();
+  if (
+    normalized.endsWith('.xml') ||
+    normalized.includes('/feed') ||
+    normalized.includes('rss') ||
+    normalized.includes('atom')
+  ) {
+    return 'rss';
+  }
+
+  return 'web';
+}
+
 function toSourceResponse(id: string, data: Partial<FirestoreSource>) {
   const category: SourceTier = data.tier === 'tier1' ? 'tier1' : 'tier2';
+  const sourceType: SourceType = data.sourceType === 'web' ? 'web' : 'rss';
 
   return {
     id,
     name: data.nombre ?? '',
     category,
+    source_type: sourceType,
     url: data.urlFeed ?? '',
     is_active: data.activa ?? true,
     created_at: toIsoString(data.createdAt),
@@ -79,6 +97,7 @@ export async function POST(req: NextRequest) {
     }
 
     const now = new Date().toISOString();
+    const sourceType = inferSourceType(url);
 
     const document = await createFirestoreDocument('fuentes', {
       nombre: name.trim(),
@@ -87,6 +106,7 @@ export async function POST(req: NextRequest) {
       activa: true,
       pilar: null,
       peso: category === 'tier1' ? 2 : 1,
+      sourceType,
       lastFetchedAt: null,
       createdAt: now,
       updatedAt: now,
