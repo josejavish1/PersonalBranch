@@ -1,57 +1,119 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import {
+  createFirestoreDocument,
+  deleteFirestoreDocument,
+  listFirestoreDocuments,
+} from '@/lib/firestore';
+
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+
+type SourceTier = 'tier1' | 'tier2';
+
+interface FirestoreSource {
+  nombre: string;
+  urlFeed: string;
+  tier: SourceTier;
+  activa: boolean;
+  pilar: string | null;
+  peso: number;
+  lastFetchedAt: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+function toIsoString(value?: string | null) {
+  return value ?? new Date(0).toISOString();
+}
+
+function toSourceResponse(id: string, data: Partial<FirestoreSource>) {
+  const category: SourceTier = data.tier === 'tier1' ? 'tier1' : 'tier2';
+
+  return {
+    id,
+    name: data.nombre ?? '',
+    category,
+    url: data.urlFeed ?? '',
+    is_active: data.activa ?? true,
+    created_at: toIsoString(data.createdAt),
+  };
+}
 
 export async function GET() {
-  const { data, error } = await supabase
-    .from('sources')
-    .select('*')
-    .order('created_at', { ascending: false });
+  try {
+    const documents = await listFirestoreDocuments('fuentes');
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const sources = documents
+      .map((document) => toSourceResponse(document.id, document.data as Partial<FirestoreSource>))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+
+    return NextResponse.json({ sources });
+  } catch (error) {
+    console.error('Sources GET error:', error);
+    return NextResponse.json({ error: 'Failed to load sources' }, { status: 500 });
   }
-
-  return NextResponse.json({ sources: data });
 }
 
 export async function POST(req: NextRequest) {
-  const body = await req.json();
-  const { name, category, url } = body;
+  try {
+    const body = await req.json();
+    const { name, category, url } = body as {
+      name?: string;
+      category?: SourceTier;
+      url?: string;
+    };
 
-  if (!name || !category || !url) {
-    return NextResponse.json({ error: 'name, category and url are required' }, { status: 400 });
+    if (!name || !category || !url) {
+      return NextResponse.json({ error: 'name, category and url are required' }, { status: 400 });
+    }
+
+    if (!['tier1', 'tier2'].includes(category)) {
+      return NextResponse.json({ error: 'category must be tier1 or tier2' }, { status: 400 });
+    }
+
+    try {
+      new URL(url);
+    } catch {
+      return NextResponse.json({ error: 'url must be a valid URL' }, { status: 400 });
+    }
+
+    const now = new Date().toISOString();
+
+    const document = await createFirestoreDocument('fuentes', {
+      nombre: name.trim(),
+      urlFeed: url.trim(),
+      tier: category,
+      activa: true,
+      pilar: null,
+      peso: category === 'tier1' ? 2 : 1,
+      lastFetchedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const source = toSourceResponse(document.id, document.data as Partial<FirestoreSource>);
+
+    return NextResponse.json({ source }, { status: 201 });
+  } catch (error) {
+    console.error('Sources POST error:', error);
+    return NextResponse.json({ error: 'Failed to create source' }, { status: 500 });
   }
-
-  if (!['tier1', 'tier2'].includes(category)) {
-    return NextResponse.json({ error: 'category must be tier1 or tier2' }, { status: 400 });
-  }
-
-  const { data, error } = await supabase
-    .from('sources')
-    .insert({ name, category, url })
-    .select()
-    .single();
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-
-  return NextResponse.json({ source: data }, { status: 201 });
 }
 
 export async function DELETE(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const id = searchParams.get('id');
+  try {
+    const { searchParams } = new URL(req.url);
+    const id = searchParams.get('id');
 
-  if (!id) {
-    return NextResponse.json({ error: 'id is required' }, { status: 400 });
+    if (!id) {
+      return NextResponse.json({ error: 'id is required' }, { status: 400 });
+    }
+
+    await deleteFirestoreDocument('fuentes', id);
+
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error('Sources DELETE error:', error);
+    return NextResponse.json({ error: 'Failed to delete source' }, { status: 500 });
   }
-
-  const { error } = await supabase.from('sources').delete().eq('id', id);
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-
-  return NextResponse.json({ success: true });
 }
