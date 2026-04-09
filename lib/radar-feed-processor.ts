@@ -94,7 +94,7 @@ function toIsoDate(value: string | null) {
 
 function getTagValue(block: string, tagNames: string[]) {
   for (const tagName of tagNames) {
-    const regex = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)</${tagName}>`, 'i');
+    const regex = new RegExp(`<${tagName}[^>]*>([\s\S]*?)</${tagName}>`, 'i');
     const match = block.match(regex);
     if (match?.[1]) {
       return normalizeWhitespace(match[1]);
@@ -106,8 +106,8 @@ function getTagValue(block: string, tagNames: string[]) {
 
 function getAtomLink(block: string, feedUrl: string) {
   const match =
-    block.match(/<link\b[^>]*rel=["']alternate["'][^>]*href=["']([^"']+)["'][^>]*\/?>(?:<\/link>)?/i) ||
-    block.match(/<link\b[^>]*href=["']([^"']+)["'][^>]*\/?>(?:<\/link>)?/i);
+    block.match(/<link[^>]*rel=["']alternate["'][^>]*href=["']([^"']+)["'][^>]*\/?>(?:<\/link>)?/i) ||
+    block.match(/<link[^>]*href=["']([^"']+)["'][^>]*\/?>(?:<\/link>)?/i);
 
   if (!match?.[1]) return null;
 
@@ -130,7 +130,7 @@ function getRssLink(block: string, feedUrl: string) {
 }
 
 function parseFeedXml(xml: string, feedUrl: string): ParsedFeedItem[] {
-  const itemMatches = [...xml.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi)];
+  const itemMatches = Array.from(xml.matchAll(/<item[^>]*>([\s\S]*?)<\/item>/gi));
   if (itemMatches.length > 0) {
     return itemMatches.map((match) => {
       const block = match[1];
@@ -144,7 +144,7 @@ function parseFeedXml(xml: string, feedUrl: string): ParsedFeedItem[] {
     });
   }
 
-  const entryMatches = [...xml.matchAll(/<entry\b[^>]*>([\s\S]*?)<\/entry>/gi)];
+  const entryMatches = Array.from(xml.matchAll(/<entry[^>]*>([\s\S]*?)<\/entry>/gi));
   return entryMatches.map((match) => {
     const block = match[1];
     return {
@@ -157,7 +157,7 @@ function parseFeedXml(xml: string, feedUrl: string): ParsedFeedItem[] {
   });
 }
 
-function scoreFeedItem(item: ParsedFeedItem) {
+function scoreFeedItem(item: ParsedFeedItemi) {
   const title = item.title.toLowerCase();
   const description = item.description.toLowerCase();
   const text = `${title} ${description}`;
