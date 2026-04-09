@@ -1,9 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Plus, Trash2, Globe, CircleCheck as CheckCircle2, Circle as XCircle, Loader as Loader2 } from 'lucide-react';
 import { Source } from '@/lib/types';
-import { supabase } from '@/lib/supabase';
 import { cn } from '@/lib/utils';
 
 interface SourcesManagerProps {
@@ -30,14 +29,50 @@ const CATEGORY_LABELS: Record<string, { label: string; className: string }> = {
 export function SourcesManager({ initialSources }: SourcesManagerProps) {
   const [sources, setSources] = useState<Source[]>(initialSources);
   const [showForm, setShowForm] = useState(false);
+  const [isLoading, setIsLoading] = useState(initialSources.length === 0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
   const [form, setForm] = useState<NewSourceForm>({
     name: '',
     category: 'tier1',
     url: '',
   });
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadSources = async () => {
+      try {
+        setError('');
+        const response = await fetch('/api/sources', { cache: 'no-store' });
+        const payload = (await response.json()) as { sources?: Source[]; error?: string };
+
+        if (!response.ok) {
+          throw new Error(payload.error || 'No se pudieron cargar las fuentes.');
+        }
+
+        if (isMounted) {
+          setSources(payload.sources ?? []);
+        }
+      } catch (err) {
+        if (isMounted) {
+          setError(err instanceof Error ? err.message : 'No se pudieron cargar las fuentes.');
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    void loadSources();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -57,37 +92,89 @@ export function SourcesManager({ initialSources }: SourcesManagerProps) {
 
     setIsSubmitting(true);
     try {
-      const { data, error: dbError } = await supabase
-        .from('sources')
-        .insert({ name: form.name.trim(), category: form.category, url: form.url.trim() })
-        .select()
-        .single();
+      const response = await fetch('/api/sources', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: form.name.trim(),
+          category: form.category,
+          url: form.url.trim(),
+        }),
+      });
 
-      if (dbError) throw dbError;
-      setSources((prev) => [data as Source, ...prev]);
+      const payload = (await response.json()) as { source?: Source; error?: string };
+
+      if (!response.ok || !payload.source) {
+        throw new Error(payload.error || 'Error al guardar la fuente.');
+      }
+
+      setSources((prev) => [payload.source as Source, ...prev]);
       setForm({ name: '', category: 'tier1', url: '' });
       setShowForm(false);
-    } catch {
-      setError('Error al guardar la fuente. Inténtalo de nuevo.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error al guardar la fuente. Inténtalo de nuevo.');
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const handleDelete = async (id: string) => {
+    setError('');
     setDeletingId(id);
+
     try {
-      await supabase.from('sources').delete().eq('id', id);
+      const response = await fetch(`/api/sources?id=${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
+
+      const payload = (await response.json()) as { success?: boolean; error?: string };
+
+      if (!response.ok) {
+        throw new Error(payload.error || 'Error al eliminar la fuente.');
+      }
+
       setSources((prev) => prev.filter((s) => s.id !== id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error al eliminar la fuente.');
     } finally {
       setDeletingId(null);
     }
   };
 
   const handleToggleActive = async (source: Source) => {
+    setError('');
+    setTogglingId(source.id);
+
     const updated = { ...source, is_active: !source.is_active };
     setSources((prev) => prev.map((s) => (s.id === source.id ? updated : s)));
-    await supabase.from('sources').update({ is_active: updated.is_active }).eq('id', source.id);
+
+    try {
+      const response = await fetch('/api/sources', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          id: source.id,
+          is_active: updated.is_active,
+        }),
+      });
+
+      const payload = (await response.json()) as { source?: Source; error?: string };
+
+      if (!response.ok || !payload.source) {
+        throw new Error(payload.error || 'Error al actualizar la fuente.');
+      }
+
+      setSources((prev) => prev.map((s) => (s.id === source.id ? (payload.source as Source) : s)));
+    } catch (err) {
+      setSources((prev) => prev.map((s) => (s.id === source.id ? source : s)));
+      setError(err instanceof Error ? err.message : 'Error al actualizar la fuente.');
+    } finally {
+      setTogglingId(null);
+    }
   };
 
   const tier1 = sources.filter((s) => s.category === 'tier1');
@@ -118,9 +205,7 @@ export function SourcesManager({ initialSources }: SourcesManagerProps) {
           <form onSubmit={handleAdd} className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1.5">
-                  Nombre de la fuente
-                </label>
+                <label className="block text-xs font-medium text-muted-foreground mb-1.5">Nombre de la fuente</label>
                 <input
                   type="text"
                   placeholder="Ej: The New Stack"
@@ -130,9 +215,7 @@ export function SourcesManager({ initialSources }: SourcesManagerProps) {
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1.5">
-                  Categoría
-                </label>
+                <label className="block text-xs font-medium text-muted-foreground mb-1.5">Categoría</label>
                 <div className="flex gap-2">
                   {(['tier1', 'tier2'] as const).map((cat) => (
                     <button
@@ -153,9 +236,7 @@ export function SourcesManager({ initialSources }: SourcesManagerProps) {
               </div>
             </div>
             <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1.5">
-                URL del feed RSS
-              </label>
+              <label className="block text-xs font-medium text-muted-foreground mb-1.5">URL del feed RSS</label>
               <input
                 type="url"
                 placeholder="https://example.com/feed/"
@@ -191,7 +272,19 @@ export function SourcesManager({ initialSources }: SourcesManagerProps) {
         </div>
       )}
 
-      {sources.length === 0 ? (
+      {error && !showForm && (
+        <p className="mb-4 text-xs text-destructive flex items-center gap-1.5">
+          <XCircle className="w-3 h-3 flex-shrink-0" />
+          {error}
+        </p>
+      )}
+
+      {isLoading ? (
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <Loader2 className="w-5 h-5 animate-spin text-muted-foreground mb-3" />
+          <p className="text-sm text-muted-foreground">Cargando fuentes...</p>
+        </div>
+      ) : sources.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20 text-center">
           <div className="w-12 h-12 rounded-full bg-secondary flex items-center justify-center mb-4">
             <Globe className="w-5 h-5 text-muted-foreground" />
@@ -208,22 +301,14 @@ export function SourcesManager({ initialSources }: SourcesManagerProps) {
             ({ label, items }) =>
               items.length > 0 && (
                 <div key={label}>
-                  <p className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground mb-3 px-1">
-                    {label}
-                  </p>
+                  <p className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground mb-3 px-1">{label}</p>
                   <div className="rounded-xl border border-border/60 overflow-hidden">
                     <table className="w-full">
                       <thead>
                         <tr className="border-b border-border/60 bg-secondary/30">
-                          <th className="text-left px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                            Nombre
-                          </th>
-                          <th className="text-left px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                            URL del Feed
-                          </th>
-                          <th className="text-left px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                            Estado
-                          </th>
+                          <th className="text-left px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Nombre</th>
+                          <th className="text-left px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">URL del Feed</th>
+                          <th className="text-left px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Estado</th>
                           <th className="px-4 py-3" />
                         </tr>
                       </thead>
@@ -257,14 +342,17 @@ export function SourcesManager({ initialSources }: SourcesManagerProps) {
                             <td className="px-4 py-3.5">
                               <button
                                 onClick={() => handleToggleActive(source)}
+                                disabled={togglingId === source.id}
                                 className={cn(
-                                  'flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full border transition-all',
+                                  'flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full border transition-all disabled:opacity-60',
                                   source.is_active
                                     ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20'
                                     : 'bg-secondary text-muted-foreground border-border/60 hover:bg-secondary/80'
                                 )}
                               >
-                                {source.is_active ? (
+                                {togglingId === source.id ? (
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                ) : source.is_active ? (
                                   <CheckCircle2 className="w-3 h-3" />
                                 ) : (
                                   <XCircle className="w-3 h-3" />

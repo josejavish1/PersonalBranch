@@ -3,6 +3,7 @@ import {
   createFirestoreDocument,
   deleteFirestoreDocument,
   listFirestoreDocuments,
+  updateFirestoreDocument,
 } from '@/lib/firestore';
 
 export const dynamic = 'force-dynamic';
@@ -97,6 +98,32 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     console.error('Sources POST error:', error);
     return NextResponse.json({ error: 'Failed to create source' }, { status: 500 });
+  }
+}
+
+export async function PATCH(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const { id, is_active } = body as {
+      id?: string;
+      is_active?: boolean;
+    };
+
+    if (!id || typeof is_active !== 'boolean') {
+      return NextResponse.json({ error: 'id and is_active are required' }, { status: 400 });
+    }
+
+    const document = await updateFirestoreDocument('fuentes', id, {
+      activa: is_active,
+      updatedAt: new Date().toISOString(),
+    });
+
+    const source = toSourceResponse(document.id, document.data as Partial<FirestoreSource>);
+
+    return NextResponse.json({ source });
+  } catch (error) {
+    console.error('Sources PATCH error:', error);
+    return NextResponse.json({ error: 'Failed to update source' }, { status: 500 });
   }
 }
 
