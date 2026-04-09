@@ -356,15 +356,17 @@ export async function processRadarFeeds() {
     }
   }
 
-  for (const [storyId, storyDoc] of storiesToWrite) {
-    if (existingStoriesById.has(storyId)) {
-      stats.storiesUpdated += 1;
-    } else {
-      stats.storiesCreated += 1;
-    }
+  await Promise.all(
+    Array.from(storiesToWrite.entries()).map(async ([storyId, storyDoc]) => {
+      if (existingStoriesById.has(storyId)) {
+        stats.storiesUpdated += 1;
+      } else {
+        stats.storiesCreated += 1;
+      }
 
-    await setFirestoreDocument(RADAR_COLLECTION, storyId, storyDoc);
-  }
+      await setFirestoreDocument(RADAR_COLLECTION, storyId, storyDoc);
+    })
+  );
 
   const nextStoryIds = new Set(storiesToWrite.keys());
   for (const existingDoc of existingRadarDocs) {
