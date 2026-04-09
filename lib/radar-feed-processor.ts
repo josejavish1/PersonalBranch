@@ -12,6 +12,7 @@ type Fuente = {
   activa?: boolean;
   tier?: string;
   peso?: number;
+  sourceType?: 'rss' | 'web';
 };
 
 type ParsedFeedItem = {
@@ -49,6 +50,14 @@ type ExistingRadarRecord = {
   status?: 'pending' | 'saved' | 'discarded';
   dedupeKey?: string;
   updatedAt?: string;
+};
+
+type RadarScore = {
+  scoreBreakdown: Record<string, number>;
+  scoreTotal: number;
+  porQueImporta: string;
+  ideaFuerte: string;
+  pilar: string;
 };
 
 const FUENTES_COLLECTION = 'fuentes';
@@ -96,11 +105,8 @@ function getTagValue(block: string, tagNames: string[]) {
   for (const tagName of tagNames) {
     const regex = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)</${tagName}>`, 'i');
     const match = block.match(regex);
-    if (match?.[1]) {
-      return normalizeWhitespace(match[1]);
-    }
+    if (match?.[1]) return normalizeWhitespace(match[1]);
   }
-
   return '';
 }
 
@@ -108,9 +114,7 @@ function getAtomLink(block: string, feedUrl: string) {
   const match =
     block.match(/<link\b[^>]*rel=["']alternate["'][^>]*href=["']([^"']+)["'][^>]*\/?>(?:<\/link>)?/i) ||
     block.match(/<link\b[^>]*href=["']([^"']+)["'][^>]*\/?>(?:<\/link>)?/i);
-
   if (!match?.[1]) return null;
-
   try {
     return new URL(match[1], feedUrl).toString();
   } catch {
@@ -121,7 +125,6 @@ function getAtomLink(block: string, feedUrl: string) {
 function getRssLink(block: string, feedUrl: string) {
   const link = getTagValue(block, ['link']);
   if (!link) return null;
-
   try {
     return new URL(link, feedUrl).toString();
   } catch {
@@ -180,12 +183,9 @@ function detectThemes(text: string) {
     ['sovereignty', ['sovereignty', 'sovereign', 'data residency', 'eu cloud']],
   ];
 
-  for (const [theme, keywords] of checks) {
-    if (keywords.some((keyword) => text.includes(keyword))) {
-      themes.push(theme);
-    }
-  }
-
+  checks.forEach(([theme, keywords]) => {
+    if (keywords.some((keyword) => text.includes(keyword))) themes.push(theme);
+  });
   return themes;
 }
 
@@ -206,7 +206,6 @@ function scoreFeedItemRuleBased(item: ParsedFeedItem): RadarScore {
   };
 
   const scoreTotal = Object.values(scoreBreakdown).reduce((sum, value) => sum + value, 0);
-
   const pilar = themes.includes('platform')
     ? 'Platform Engineering e Internal Developer Platforms'
     : themes.includes('resilience') || themes.includes('security')
@@ -221,7 +220,7 @@ function scoreFeedItemRuleBased(item: ParsedFeedItem): RadarScore {
     : 'La señal se puede traducir en una conversación ejecutiva sobre operabilidad, coste y resiliencia.';
 
   if (themes.includes('finops')) {
-    porQueImporta = `“${hook}” toca una palancha ejecutiva de coste cloud, accountability y priorización de capacidad.`
+    porQueImporta = `“${hook}” toca una palanca ejecutiva de coste cloud, accountability y priorización de capacidad.`;
     ideaFuerte = context
       ? `La oportunidad está en convertir ${lowerFirst(context)} en una disciplina operable de FinOps y gobierno.`
       : 'Coste marginal, ownership y decisiones de plataforma deben quedar conectados en el operating model.';
@@ -235,37 +234,74 @@ function scoreFeedItemRuleBased(item: ParsedFeedItem): RadarScore {
     ideaFuerte = context
       ? `La lectura ejecutiva es usar ${lowerFirst(context)} para reducir fricción, excepciones y dependencia de conocimiento tribal.`
       : 'Una plataforma útil no es más tooling: es menos fricción para equipos y más gobierno para la organización.';
-  } else if (themes.includes('resilience')) {
-    porQueImporta = `“${hook}” tiene implicaciones en resiliencia operativa, MTTR y capacidad de absorber cambio sin romper negocio.`;
-    ideaFuerte = context
-      ? `La conversación potente es cómo ${lowerFirst(context)} refuerza detección temprana, respuesta y aprendizaje operativo.`
-      : 'Resiliencia real aparece cuando observabilidad, operación y diseño de plataforma se piensan juntos.';
-  } else if (themes.includes('cloud')) {
-    porQueImporta = `“${hook}” obliga a revisar criterio cloud, dependencia de proveedor y modelo económico del estate.`;
-    ideaFuerte = context
-      ? `La idea fuerte es convertir ${lowerFirst(context)} en una decisión explícita sobre dónde correr, cómo gobernar y qué coste aceptar.`
-      : 'Hybrid y public cloud solo crean valor cuando el criterio técnico está ligado a coste, riesgo y soberanía.';
-  } else if (themes.includes('modernization')) {
-    porQueImporta = `“${hook}” apunta a decisiones de modernización que cambian complejidad operativa, resiliencia y deuda de infraestructura.`;
-    ideaFuerte = context
-      ? `La lectura más útil es usar ${lowerFirst(context)} para aterrizar una narrativa de modernización con impacto real en operaciones.`
-      : 'Modernizar no es mover tecnología: es rediseñar complejidad, fiabilidad y capacidad de evolución.';
   }
 
-  return {
-    scoreBreakdown,
-    scoreTotal,
-    porQueImporta,
-    ideaFuerte,
-    pilar,
-  };
+  return { scoreBreakdown, scoreTotal, porQueImporta, ideaFuerte, pilar };
+}
+
+function extractLinks(html: string, baseUrl: string) {
+  const origin = new URL(baseUrl).origin;
+  const matches = Array.from(html.matchAll(/href=["']([^"'#]+)["']/gi));
+  const urls = new Set<string>();
+
+  matches.forEach((match) => {
+    try {
+      const url = new URL(match[1], baseUrl);
+      const normalized = url.toString();
+      const pathname = url.pathname.toLowerCase();
+      const looksLikeArticle =
+        pathname.includes('/blog/') ||
+        pathname.includes('/post/') ||
+        pathname.includes('/news/') ||
+        /\/(20\d{2})\//.test(pathname) ||
+        pathname.split('/').filter(Boolean).length >= 2;
+
+      const noisy =
+        pathname.endsWith('.jpg') ||
+        pathname.endsWith('.png') ||
+        pathname.endsWith('.svg') ||
+        pathname.endsWith('.pdf') ||
+        pathname.includes('/tag/') ||
+        pathname.includes('/category/') ||
+        pathname === '/' ||
+        normalized.includes('#') ||
+        normalized.includes('mailto:');
+
+      if (normalized.startsWith(origin) && looksLikeArticle && !noisy && normalized.length < 220) {
+        urls.add(normalized);
+      }
+    } catch {}
+  });
+
+  return Array.from(urls).slice(0, 20);
+}
+
+function titleFromUrl(url: string) {
+  try {
+    const pathname = new URL(url).pathname;
+    const slug = pathname.split('/').filter(Boolean).slice(-1)[0] || pathname;
+    return normalizeWhitespace(slug.replace(/[-_]/g, ' '));
+  } catch {
+    return url;
+  }
+}
+
+function extractArticleTitle(html: string) {
+  const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1];
+  const titleTag = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+  return normalizeWhitespace(ogTitle || titleTag || '');
+}
+
+function extractArticleDescription(html: string) {
+  const metaDescription = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i)?.[1];
+  const ogDescription = html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i)?.[1];
+  return normalizeWhitespace(metaDescription || ogDescription || '');
 }
 
 function extractArticleText(html: string) {
   const articleMatch = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i);
   const mainMatch = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i);
   const bodyMatch = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
-
   const candidate = articleMatch?.[1] || mainMatch?.[1] || bodyMatch?.[1] || html;
   const withoutNoise = candidate
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
@@ -273,11 +309,10 @@ function extractArticleText(html: string) {
     .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ' ')
     .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, ' ')
     .replace(/<img\b[^>]*>/gi, ' ');
-
   return truncateWords(normalizeWhitespace(withoutNoise), 1800);
 }
 
-async function fetchArticleForAnalysis(url: string) {
+async function fetchArticle(url: string) {
   try {
     const response = await fetch(url, {
       headers: {
@@ -286,150 +321,19 @@ async function fetchArticleForAnalysis(url: string) {
       },
       cache: 'no-store',
     });
-
-    if (!response.ok) {
-      return '';
-    }
-
+    if (!response.ok) return null;
     const html = await response.text();
-    return extractArticleText(html);
-  } catch {
-    return '';
-  }
-}
-
-function parseGeminiScore(raw: unknown, fallback: number) {
-  const value = typeof raw === 'number' ? raw : Number(raw);
-  if (Number.isNaN(value)) return fallback;
-  return Math.max(1, Math.min(5, Math.round(value)));
-}
-
-async function analyzeWithGemini(item: ParsedFeedItem, articleUrl: string): Promise<RadarScore | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return null;
-  }
-
-  const articleText = await fetchArticleForAnalysis(articleUrl);
-  const prompt = [
-    'Eres un analista editorial para Executive AI Radar.',
-    'Evalúa la señal para una audiencia de directivos técnicos de infraestructura enterprise.',
-    'Debes priorizar operating model, rinesgo, resiliencia, coste, soberanía, platform engineering y transformación de infraestructuras.',
-    'Descarta hype técnico sin implicación ejecutiva real.',
-    '',
-    `Título: ${item.title}`,
-    `Descripción RSS: ${item.description || 'N/A'}`,
-    `URL: ${articleUrl}`,
-    '',
-    'Texto del artículo:',
-    articleText || 'No se pudo recuperar el artículo completo; analiza con el contexto disponible.',
-  ].join('\n');
-
-  const schema = {
-    type: 'object',
-    properties: {
-      pilar: {
-        type: 'string',
-        enum: [
-          'Diseño y modernización de infraestructuras enterprise y private cloud',
-          'Hybrid Cloud y Public Cloud con criterio',
-          'Platform Engineering e Internal Developer Platforms',
-          'Resiliencia, observabilidad y AIOps',
-        ],
-      },
-      porQueImporta: { type: 'string' },
-      ideaFuerte: { type: 'string' },
-      scoreBreakdown: {
-        type: 'object',
-        properties: {
-          novedad: { type: 'integer', minimum: 1, maximum: 5 },
-          relevancia_estrategica: { type: 'integer', minimum: 1, maximum: 5 },
-          impacto_ejecutivo: { type: 'integer', minimum: 1, maximum: 5 },
-          aplicabilidad_enterprise: { type: 'integer', minimum: 1, maximum: 5 },
-          potencial_editorial: { type: 'integer', minimum: 1, maximum: 5 },
-        },
-        required: [
-          'novedad',
-          'relevancia_estrategica',
-          'impacto_ejecutivo',
-          'aplicabilidad_enterprise',
-          'potencial_editorial',
-        ],
-      },
-    },
-    required: ['pilar', 'porQueImporta', 'ideaFuerte', 'scoreBreakdown'],
-  };
-
-  try {
-    const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey,
-      },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseJsonSchema: schema,
-        },
-      }),
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    const payload = (await response.json()) as {
-      candidates?: Array<{
-        content?: {
-          parts?: Array<{
-            text?: string;
-          }>;
-        };
-      }>;
-    };
-
-    const rawText = payload.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!rawText) {
-      return null;
-    }
-
-    const parsed = JSON.parse(rawText) as {
-      pilar?: string;
-      porQueImporta?: string;
-      ideaFuerte?: string;
-      scoreBreakdown?: Record<string, unknown>;
-    };
-
-    const scoreBreakdown = {
-      novedad: parseGeminiScore(parsed.scoreBreakdown?.novedad, 3),
-      relevancia_estrategica: parseGeminiScore(parsed.scoreBreakdown?.relevancia_estrategica, 3),
-      impacto_ejecutivo: parseGeminiScore(parsed.scoreBreakdown?.impacto_ejecutivo, 3),
-      aplicabilidad_enterprise: parseGeminiScore(parsed.scoreBreakdown?.aplicabilidad_enterprise, 3),
-      potencial_editorial: parseGeminiScore(parsed.scoreBreakdown?.potencial_editorial, 3),
-    };
-
     return {
-      scoreBreakdown,
-      scoreTotal: Object.values(scoreBreakdown).reduce((sum, value) => sum + value, 0),
-      porQueImporta: truncateWords(parsed.porQueImporta || '', 45) || scoreFeedItemRuleBased(item).porQueImporta,
-      ideaFuerte: truncateWords(parsed.ideaFuerte || '', 35) || scoreFeedItemRuleBased(item).ideaFuerte,
-      pilar:
-        parsed.pilar ||
-        'Diseño y modernización de infraestructuras enterprise y private cloud',
+      title: extractArticleTitle(html) || titleFromUrl(url),
+      description: extractArticleDescription(html),
+      text: extractArticleText(html),
     };
   } catch {
     return null;
   }
 }
 
-async function scoreFeedItem(item: ParsedFeedItem, articleUrl: string): Promise<RadarScore> {
-  const geminiScore = await analyzeWithGemini(item, articleUrl);
-  if (geminiScore) {
-    return geminiScore;
-  }
-
+async function scoreFeedItem(item: ParsedFeedItem, _articleUrl: string): Promise<RadarScore> {
   return scoreFeedItemRuleBased(item);
 }
 
@@ -437,7 +341,84 @@ function buildStoryId(title: string, canonicalUrl: string | null, publishedAt: s
   return sha1(canonicalUrl || `${normalizeTitle(title)}|${publishedAt}`);
 }
 
-async function processSingleSource(
+async function writeStory(
+  sourceId: string,
+  source: Fuente,
+  item: ParsedFeedItem,
+  existingFeedItemIds: Set<string>,
+  existingStoriesById: Map<string, ExistingRadarRecord>,
+  storiesToWrite: Map<string, ExistingRadarRecord>,
+  stats: ProcessStats,
+  sourceType: 'rss' | 'web'
+) {
+  stats.rawItemsSeen += 1;
+  const now = new Date().toISOString();
+  const title = normalizeWhitespace(item.title);
+  const canonicalUrl = item.link;
+  const publishedAt = item.publishedAt ?? now;
+
+  if (!title || !canonicalUrl) {
+    stats.skippedInvalid += 1;
+    return;
+  }
+
+  const externalId = item.guid || canonicalUrl || `${normalizeTitle(title)}|${publishedAt}`;
+  const feedItemId = sha1(`${sourceId}|${externalId}`);
+  const storyId = buildStoryId(title, canonicalUrl, publishedAt);
+  const contentHash = sha1(`${title}|${item.description}|${publishedAt}`);
+
+  await setFirestoreDocument(FEED_ITEMS_COLLECTION, feedItemId, {
+    fuenteId: sourceId,
+    feedUrl: source.urlFeed ?? null,
+    sourceType,
+    externalId,
+    guid: item.guid,
+    itemLink: canonicalUrl,
+    canonicalUrl,
+    titleRaw: title,
+    titleNormalized: normalizeTitle(title),
+    publishedAt,
+    fetchedAt: now,
+    contentSnippet: item.description,
+    contentHash,
+    processingStatus: 'processed',
+  });
+
+  if (existingFeedItemIds.has(feedItemId)) stats.rawItemsUpdated += 1;
+  else {
+    existingFeedItemIds.add(feedItemId);
+    stats.rawItemsInserted += 1;
+  }
+
+  const scored = await scoreFeedItem(item, canonicalUrl);
+  if (scored.scoreTotal < 15) return;
+
+  const current = storiesToWrite.get(storyId) ?? existingStoriesById.get(storyId);
+  const mergedSources = {
+    ...((current?.fuentes ?? {}) as Record<string, boolean>),
+    [sourceId]: true,
+  };
+
+  storiesToWrite.set(storyId, {
+    titulo: current?.titulo ?? title,
+    url: current?.url ?? canonicalUrl,
+    fuenteId: current?.fuenteId ?? sourceId,
+    fuentes: mergedSources,
+    sourceCount: Object.keys(mergedSources).length,
+    publishedAt: current?.publishedAt ?? publishedAt,
+    fetchedAt: now,
+    scoreTotal: Math.max(Number(current?.scoreTotal ?? 0), scored.scoreTotal),
+    scoreBreakdown: scored.scoreBreakdown,
+    porQueImporta: scored.porQueImporta,
+    ideaFuerte: scored.ideaFuerte,
+    pilar: scored.pilar,
+    status: current?.status ?? 'pending',
+    dedupeKey: storyId,
+    updatedAt: now,
+  });
+}
+
+async function processRssSource(
   sourceId: string,
   source: Fuente,
   existingFeedItemIds: Set<string>,
@@ -452,95 +433,47 @@ async function processSingleSource(
     },
     cache: 'no-store',
   });
-
-  if (!response.ok) {
-    throw new Error(`feed-fetch-${response.status}`);
-  }
+  if (!response.ok) throw new Error(`feed-fetch-${response.status}`);
 
   const xml = await response.text();
   const parsedItems = parseFeedXml(xml, source.urlFeed!).slice(0, 20);
-  const now = new Date().toISOString();
 
   for (const item of parsedItems) {
-    stats.rawItemsSeen += 1;
-
-    const title = normalizeWhitespace(item.title);
-    const canonicalUrl = item.link;
-    const publishedAt = item.publishedAt ?? now;
-
-    if (!title || !canonicalUrl) {
-      stats.skippedInvalid += 1;
-      continue;
-    }
-
-    const externalId = item.guid || canonicalUrl || `${normalizeTitle(title)}|${publishedAt}`;
-    const feedItemId = sha1(`${sourceId}|${externalId}`);
-    const storyId = buildStoryId(title, canonicalUrl, publishedAt);
-    const contentHash = sha1(`${title}|${item.description}|${publishedAt}`);
-
-    await setFirestoreDocument(FEED_ITEMS_COLLECTION, feedItemId, {
-      fuenteId: sourceId,
-      feedUrl: source.urlFeed ?? null,
-      externalId,
-      guid: item.guid,
-      itemLink: canonicalUrl,
-      canonicalUrl,
-      titleRaw: title,
-      titleNormalized: normalizeTitle(title),
-      publishedAt,
-      fetchedAt: now,
-      contentSnippet: item.description,
-      contentHash,
-      processingStatus: 'processed',
-    });
-
-    if (existingFeedItemIds.has(feedItemId)) {
-      stats.rawItemsUpdated += 1;
-    } else {
-      existingFeedItemIds.add(feedItemId);
-      stats.rawItemsInserted += 1;
-    }
-
-    const scored = await scoreFeedItem(item, canonicalUrl);
-    if (scored.scoreTotal < 15) {
-      continue;
-    }
-
-    const current = storiesToWrite.get(storyId) ?? existingStoriesById.get(storyId);
-    const mergedSources = {
-      ...((current?.fuentes ?? {}) as Record<string, boolean>),
-      [sourceId]: true,
-    };
-
-    const storyDoc: ExistingRadarRecord = {
-      titulo: current?.titulo ?? title,
-      url: current?.url ?? canonicalUrl,
-      fuenteId: current?.fuenteId ?? sourceId,
-      fuentes: mergedSources,
-      sourceCount: Object.keys(mergedSources).length,
-      publishedAt: current?.publishedAt ?? publishedAt,
-      fetchedAt: now,
-      scoreTotal: Math.max(Number(current?.scoreTotal ?? 0), scored.scoreTotal),
-      scoreBreakdown: scored.scoreBreakdown,
-      porQueImporta: scored.porQueImporta,
-      ideaFuerte: scored.ideaFuerte,
-      pilar: scored.pilar,
-      status: current?.status ?? 'pending',
-      dedupeKey: storyId,
-      updatedAt: now,
-    };
-
-    storiesToWrite.set(storyId, storyDoc);
+    await writeStory(sourceId, source, item, existingFeedItemIds, existingStoriesById, storiesToWrite, stats, 'rss');
   }
+}
 
-  await updateFirestoreDocument(FUENTES_COLLECTION, sourceId, {
-    lastFetchedAt: now,
-    lastSuccessAt: now,
-    lastRunStatus: 'ok',
-    updatedAt: now,
+async function processWebSource(
+  sourceId: string,
+  source: Fuente,
+  existingFeedItemIds: Set<string>,
+  existingStoriesById: Map<string, ExistingRadarRecord>,
+  storiesToWrite: Map<string, ExistingRadarRecord>,
+  stats: ProcessStats
+) {
+  const response = await fetch(source.urlFeed!, {
+    headers: {
+      'user-agent': 'Executive-AI-Radar/0.1 (+https://firebase.google.com)',
+      accept: 'text/html,application/xhtml+xml, application/xml;q=0.9,*/*;q=0.8',
+    },
+    cache: 'no-store',
   });
+  if (!response.ok) throw new Error(`web-fetch-${response.status}`);
 
-  stats.feedsProcessed += 1;
+  const html = await response.text();
+  const links = extractLinks(html, source.urlFeed!);
+
+  for (const link of links) {
+    const article = await fetchArticle(link);
+    const item: ParsedFeedItem = {
+      guid: link,
+      link,
+      title: article?.title || titleFromUrl(link),
+      description: article?.description || truncateWords(article?.text || '', 40),
+      publishedAt: new Date().toISOString(),
+    };
+    await writeStory(sourceId, source, item, existingFeedItemIds, existingStoriesById, storiesToWrite, stats, 'web');
+  }
 }
 
 export async function processRadarFeeds() {
@@ -562,9 +495,7 @@ export async function processRadarFeeds() {
   ]);
 
   const existingFeedItemIds = new Set(existingFeedItems.map((doc) => doc.id));
-  const existingStoriesById = new Map(
-    existingRadarDocs.map((doc) => [doc.id, doc.data as ExistingRadarRecord])
-  );
+  const existingStoriesById = new Map(existingRadarDocs.map((doc) => [doc.id, doc.data as ExistingRadarRecord]));
   const storiesToWrite = new Map<string, ExistingRadarRecord>();
   const activeSources = sourcesSnapshot.filter((doc) => (doc.data as Fuente).activa === true);
 
@@ -582,7 +513,19 @@ export async function processRadarFeeds() {
     }
 
     try {
-      await processSingleSource(sourceId, source, existingFeedItemIds, existingStoriesById, storiesToWrite, stats);
+      if (source.sourceType === 'web') {
+        await processWebSource(sourceId, source, existingFeedItemIds, existingStoriesById, storiesToWrite, stats);
+      } else {
+        await processRssSource(sourceId, source, existingFeedItemIds, existingStoriesById, storiesToWrite, stats);
+      }
+
+      stats.feedsProcessed += 1;
+      await updateFirestoreDocument(FUENTES_COLLECTION, sourceId, {
+        lastFetchedAt: new Date().toISOString(),
+        lastSuccessAt: new Date().toISOString(),
+        lastRunStatus: 'ok',
+        updatedAt: new Date().toISOString(),
+      });
     } catch (error) {
       stats.feedsFailed += 1;
       await updateFirestoreDocument(FUENTES_COLLECTION, sourceId, {
@@ -594,17 +537,13 @@ export async function processRadarFeeds() {
 
   await Promise.all(
     Array.from(storiesToWrite.entries()).map(async ([storyId, storyDoc]) => {
-      if (existingStoriesById.has(storyId)) {
-        stats.storiesUpdated += 1;
-      } else {
-        stats.storiesCreated += 1;
-      }
-
+      if (existingStoriesById.has(storyId)) stats.storiesUpdated += 1;
+      else stats.storiesCreated += 1;
       await setFirestoreDocument(RADAR_COLLECTION, storyId, storyDoc);
     })
   );
 
-  const nextStoryIds = new Set(storiesToWrite.keys());
+  const nextStoryIds = new Set(Array.from(storiesToWrite.keys()));
   for (const existingDoc of existingRadarDocs) {
     if (!nextStoryIds.has(existingDoc.id)) {
       await deleteFirestoreDocument(RADAR_COLLECTION, existingDoc.id);
