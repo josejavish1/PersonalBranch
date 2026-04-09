@@ -1,9 +1,9 @@
 import crypto from 'node:crypto';
 import {
-  deleteFirestoreDocument,
   listFirestoreDocuments,
   setFirestoreDocument,
   updateFirestoreDocument,
+  deleteFirestoreDocument,
 } from '@/lib/firestore';
 
 type Fuente = {
@@ -31,6 +31,24 @@ type ProcessStats = {
   storiesCreated: number;
   storiesUpdated: number;
   skippedInvalid: number;
+};
+
+type ExistingRadarRecord = {
+  titulo?: string;
+  url?: string;
+  fuenteId?: string;
+  fuentes?: Record<string, boolean>;
+  sourceCount?: number;
+  publishedAt?: string;
+  fetchedAt?: string;
+  scoreTotal?: number;
+  scoreBreakdown?: Record<string, number>;
+  porQueImporta?: string;
+  ideaFuerte?: string;
+  pilar?: string;
+  status?: 'pending' | 'saved' | 'discarded';
+  dedupeKey?: string;
+  updatedAt?: string;
 };
 
 const FUENTES_COLLECTION = 'fuentes';
@@ -153,7 +171,6 @@ function scoreFeedItem(item: ParsedFeedItem) {
   };
 
   const scoreTotal = Object.values(scoreBreakdown).reduce((sum, value) => sum + value, 0);
-
   const isFinOps = text.includes('finops') || text.includes('cost');
   const isSecurity = text.includes('zero trust') || text.includes('security');
 
@@ -180,12 +197,16 @@ function scoreFeedItem(item: ParsedFeedItem) {
   };
 }
 
+function buildStoryId(title: string, canonicalUrl: string | null, publishedAt: string) {
+  return sha1(canonicalUrl || `${normalizeTitle(title)}|${publishedAt}`);
+}
+
 async function processSingleSource(
   sourceId: string,
   source: Fuente,
   existingFeedItemIds: Set<string>,
-  existingStoryIds: Set<string>,
-  existingRadarDocsBySource: Map<string, string[]>,
+  existingStoriesById: Map<string, ExistingRadarRecord>,
+  storiesToWrite: Map<string, ExistingRadarRecord>,
   stats: ProcessStats
 ) {
   const response = await fetch(source.urlFeed!, {
@@ -203,7 +224,6 @@ async function processSingleSource(
   const xml = await response.text();
   const parsedItems = parseFeedXml(xml, source.urlFeed!).slice(0, 20);
   const now = new Date().toISOString();
-  const newStoryIdsForSource = new Set<string>();
 
   for (const item of parsedItems) {
     stats.rawItemsSeen += 1;
@@ -219,10 +239,10 @@ async function processSingleSource(
 
     const externalId = item.guid || canonicalUrl || `${normalizeTitle(title)}|${publishedAt}`;
     const feedItemId = sha1(`${sourceId}|${externalId}`);
-    const storyId = sha1(`${sourceId}|${canonicalUrl}`);
+    const storyId = buildStoryId(title, canonicalUrl, publishedAt);
     const contentHash = sha1(`${title}|${item.description}|${publishedAt}`);
 
-    const feedItemDoc = {
+    await setFirestoreDocument(FEED_ITEMS_COLLECTION, feedItemId, {
       fuenteId: sourceId,
       feedUrl: source.urlFeed ?? null,
       externalId,
@@ -236,9 +256,7 @@ async function processSingleSource(
       contentSnippet: item.description,
       contentHash,
       processingStatus: 'processed',
-    };
-
-    await setFirestoreDocument(FEED_ITEMS_COLLECTION, feedItemId, feedItemDoc);
+    });
 
     if (existingFeedItemIds.has(feedItemId)) {
       stats.rawItemsUpdated += 1;
@@ -248,43 +266,35 @@ async function processSingleSource(
     }
 
     const scored = scoreFeedItem(item);
-
     if (scored.scoreTotal < 15) {
       continue;
     }
 
-    const radarDoc = {
-      titulo: title,
-      url: canonicalUrl,
-      fuenteId: sourceId,
-      publishedAt,
+    const current = storiesToWrite.get(storyId) ?? existingStoriesById.get(storyId);
+    const mergedSources = {
+      ...((current?.fuentes ?? {}) as Record<string, boolean>),
+      [sourceId]: true,
+    };
+
+    const storyDoc: ExistingRadarRecord = {
+      titulo: current?.titulo ?? title,
+      url: current?.url ?? canonicalUrl,
+      fuenteId: current?.fuenteId ?? sourceId,
+      fuentes: mergedSources,
+      sourceCount: Object.keys(mergedSources).length,
+      publishedAt: current?.publishedAt ?? publishedAt,
       fetchedAt: now,
-      scoreTotal: scored.scoreTotal,
+      scoreTotal: Math.max(Number(current?.scoreTotal ?? 0), scored.scoreTotal),
       scoreBreakdown: scored.scoreBreakdown,
       porQueImporta: scored.porQueImporta,
       ideaFuerte: scored.ideaFuerte,
       pilar: scored.pilar,
-      status: 'pending',
+      status: current?.status ?? 'pending',
       dedupeKey: storyId,
       updatedAt: now,
     };
 
-    await setFirestoreDocument(RADAR_COLLECTION, storyId, radarDoc);
-    newStoryIdsForSource.add(storyId);
-
-    if (existingStoryIds.has(storyId)) {
-      stats.storiesUpdated += 1;
-    } else {
-      existingStoryIds.add(storyId);
-      stats.storiesCreated += 1;
-    }
-  }
-
-  const existingDocsForSource = existingRadarDocsBySource.get(sourceId) ?? [];
-  for (const docId of existingDocsForSource) {
-    if (!newStoryIdsForSource.has(docId)) {
-      await deleteFirestoreDocument(RADAR_COLLECTION, docId);
-    }
+    storiesToWrite.set(storyId, storyDoc);
   }
 
   await updateFirestoreDocument(FUENTES_COLLECTION, sourceId, {
@@ -316,17 +326,10 @@ export async function processRadarFeeds() {
   ]);
 
   const existingFeedItemIds = new Set(existingFeedItems.map((doc) => doc.id));
-  const existingStoryIds = new Set(existingRadarDocs.map((doc) => doc.id));
-  const existingRadarDocsBySource = new Map<string, string[]>();
-
-  for (const doc of existingRadarDocs) {
-    const sourceId = typeof doc.data.fuenteId === 'string' ? (doc.data.fuenteId as string) : null;
-    if (!sourceId) continue;
-    const current = existingRadarDocsBySource.get(sourceId) ?? [];
-    current.push(doc.id);
-    existingRadarDocsBySource.set(sourceId, current);
-  }
-
+  const existingStoriesById = new Map(
+    existingRadarDocs.map((doc) => [doc.id, doc.data as ExistingRadarRecord])
+  );
+  const storiesToWrite = new Map<string, ExistingRadarRecord>();
   const activeSources = sourcesSnapshot.filter((doc) => (doc.data as Fuente).activa === true);
 
   for (const doc of activeSources) {
@@ -343,20 +346,30 @@ export async function processRadarFeeds() {
     }
 
     try {
-      await processSingleSource(
-        sourceId,
-        source,
-        existingFeedItemIds,
-        existingStoryIds,
-        existingRadarDocsBySource,
-        stats
-      );
+      await processSingleSource(sourceId, source, existingFeedItemIds, existingStoriesById, storiesToWrite, stats);
     } catch (error) {
       stats.feedsFailed += 1;
       await updateFirestoreDocument(FUENTES_COLLECTION, sourceId, {
         lastRunStatus: `error:${error instanceof Error ? error.message : 'unknown'}`,
         updatedAt: new Date().toISOString(),
       });
+    }
+  }
+
+  for (const [storyId, storyDoc] of storiesToWrite) {
+    if (existingStoriesById.has(storyId)) {
+      stats.storiesUpdated += 1;
+    } else {
+      stats.storiesCreated += 1;
+    }
+
+    await setFirestoreDocument(RADAR_COLLECTION, storyId, storyDoc);
+  }
+
+  const nextStoryIds = new Set(storiesToWrite.keys());
+  for (const existingDoc of existingRadarDocs) {
+    if (!nextStoryIds.has(existingDoc.id)) {
+      await deleteFirestoreDocument(RADAR_COLLECTION, existingDoc.id);
     }
   }
 

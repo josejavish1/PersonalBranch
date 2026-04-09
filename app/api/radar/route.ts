@@ -28,6 +28,8 @@ type RadarRecord = {
   titulo?: string;
   url?: string;
   fuenteId?: string;
+  fuentes?: Record<string, boolean>;
+  sourceCount?: number;
   publishedAt?: string;
   fetchedAt?: string;
   scoreTotal?: number;
@@ -70,7 +72,7 @@ async function getSourceIndex() {
 }
 
 function buildRadarDedupeKey(data: RadarRecord) {
-  return [data.fuenteId ?? 'unknown', data.url ?? data.titulo ?? 'untitled', data.publishedAt ?? 'no-date'].join('|');
+  return [data.url ?? data.titulo ?? 'untitled', data.publishedAt ?? 'no-date'].join('|');
 }
 
 export async function GET() {
@@ -93,14 +95,12 @@ export async function GET() {
 
       const dedupeKey = buildRadarDedupeKey(radar);
       const existing = deduped.get(dedupeKey);
-
       if (!existing || article.created_at > existing.created_at) {
         deduped.set(dedupeKey, article);
       }
     }
 
     const articles = Array.from(deduped.values()).sort((a, b) => b.created_at.localeCompare(a.created_at));
-
     return NextResponse.json({ articles });
   } catch (error) {
     console.error('Radar GET error:', error);
@@ -111,11 +111,7 @@ export async function GET() {
 export async function POST() {
   try {
     const stats = await processRadarFeeds();
-
-    return NextResponse.json({
-      ok: true,
-      stats,
-    });
+    return NextResponse.json({ ok: true, stats });
   } catch (error) {
     console.error('Radar POST error:', error);
     return NextResponse.json({ error: 'Processing failed' }, { status: 500 });
@@ -125,10 +121,7 @@ export async function POST() {
 export async function PATCH(req: NextRequest) {
   try {
     const body = await req.json();
-    const { id, status } = body as {
-      id?: string;
-      status?: ArticleStatus;
-    };
+    const { id, status } = body as { id?: string; status?: ArticleStatus };
 
     if (!id || !status || !['pending', 'saved', 'discarded'].includes(status)) {
       return NextResponse.json({ error: 'id and a valid status are required' }, { status: 400 });
@@ -145,7 +138,6 @@ export async function PATCH(req: NextRequest) {
     const radar = updated.data as RadarRecord;
     const source = radar.fuenteId ? sourceIndex.get(radar.fuenteId) : undefined;
     const article = toArticleResponse(updated.id, radar, source);
-
     return NextResponse.json({ article });
   } catch (error) {
     console.error('Radar PATCH error:', error);
