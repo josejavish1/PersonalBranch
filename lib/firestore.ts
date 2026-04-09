@@ -57,14 +57,21 @@ function getDocumentsBaseUrl() {
 type FirestorePrimitive = string | number | boolean | null;
 type FirestoreMap = { [key: string]: FirestoreValue };
 type FirestoreValue = FirestorePrimitive | FirestoreMap;
-
 type FirestoreDocumentData = Record<string, FirestoreValue>;
+
+type FirestoreEncodedValue =
+  | { nullValue: null }
+  | { stringValue: string }
+  | { booleanValue: boolean }
+  | { integerValue: string }
+  | { doubleValue: number }
+  | { mapValue: { fields: Record<string, FirestoreEncodedValue> } };
 
 function isPlainObject(value: unknown): value is FirestoreMap {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function encodeValue(value: FirestoreValue) {
+function encodeValue(value: FirestoreValue): FirestoreEncodedValue {
   if (value === null) {
     return { nullValue: null };
   }
@@ -96,7 +103,7 @@ function encodeValue(value: FirestoreValue) {
   return { nullValue: null };
 }
 
-function decodeValue(value: Record<string, unknown>) {
+function decodeValue(value: Record<string, unknown>): FirestoreValue {
   if ('stringValue' in value) return value.stringValue as string;
   if ('booleanValue' in value) return value.booleanValue as boolean;
   if ('integerValue' in value) return Number(value.integerValue);
@@ -111,11 +118,11 @@ function decodeValue(value: Record<string, unknown>) {
   return null;
 }
 
-function encodeFields(data: FirestoreDocumentData) {
+function encodeFields(data: FirestoreDocumentData): Record<string, FirestoreEncodedValue> {
   return Object.fromEntries(Object.entries(data).map(([key, value]) => [key, encodeValue(value)]));
 }
 
-function decodeFields(fields?: Record<string, Record<string, unknown>>) {
+function decodeFields(fields?: Record<string, Record<string, unknown>>): FirestoreDocumentData {
   if (!fields) {
     return {};
   }
