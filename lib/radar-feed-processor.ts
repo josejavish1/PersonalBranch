@@ -157,42 +157,106 @@ function parseFeedXml(xml: string, feedUrl: string): ParsedFeedItem[] {
   });
 }
 
+function truncateWords(value: string, count: number) {
+  const words = normalizeWhitespace(value).split(' ').filter(Boolean);
+  return words.slice(0, count).join(' ');
+}
+
+function lowerFirst(value: string) {
+  if (!value) return value;
+  return value.charAt(0).toLowerCase() + value.slice(1);
+}
+
+function detectThemes(text: string) {
+  const themes: string[] = [];
+  const checks: Array<[string, string[]]> = [
+    ['finops', ['finops', 'cost', 'spend', 'billing', 'chargeback', 'showback']],
+    ['security', ['zero trust', 'security', 'identity', 'policy', 'compliance', 'isolation']],
+    ['platform', ['platform engineering', 'platform', 'developer platform', 'idp', 'golden path']],
+    ['resilience', ['resilience', 'observability', 'sre', 'incident', 'reliability', 'aiops']],
+    ['cloud', ['hybrid cloud', 'public cloud', 'multicloud', 'cloud', 'aws', 'azure', 'gcp']],
+    ['kubernetes', ['kubernetes', 'container', 'cluster', 'k8s']],
+    ['modernization', ['private cloud', 'vmware', 'openstack', 'virtualization', 'modernization', 'infrastructure']],
+    ['sovereignty', ['sovereignty', 'sovereign', 'data residency', 'eu cloud']],
+  ];
+
+  for (const [theme, keywords] of checks) {
+    if (keywords.some((keyword) => text.includes(keyword))) {
+      themes.push(theme);
+    }
+  }
+
+  return themes;
+}
+
 function scoreFeedItem(item: ParsedFeedItem) {
   const title = item.title.toLowerCase();
   const description = item.description.toLowerCase();
   const text = `${title} ${description}`;
+  const themes = detectThemes(text);
+  const hook = truncateWords(item.title, 10) || 'esta señal';
+  const context = truncateWords(item.description, 16);
 
   const scoreBreakdown = {
-    novedad: text.includes('release') || text.includes('launch') ? 4 : 3,
-    relevancia_estrategica: text.includes('platform') || text.includes('architecture') ? 4 : 3,
-    impacto_ejecutivo: text.includes('cost') || text.includes('risk') || text.includes('security') ? 4 : 3,
-    aplicabilidad_enterprise: text.includes('enterprise') || text.includes('kubernetes') || text.includes('cloud') ? 4 : 3,
-    potencial_editorial: item.title.length > 30 ? 3 : 2,
+    novedad: text.includes('release') || text.includes('launch') || text.includes('preview') ? 4 : 3,
+    relevancia_estrategica: themes.includes('platform') || themes.includes('cloud') || themes.includes('modernization') ? 4 : 3,
+    impacto_ejecutivo: themes.includes('finops') || themes.includes('security') || themes.includes('resilience') ? 4 : 3,
+    aplicabilidad_enterprise: themes.includes('kubernetes') || themes.includes('cloud') || themes.includes('modernization') ? 4 : 3,
+    potencial_editorial: item.title.length > 30 || context.length > 50 ? 3 : 2,
   };
 
   const scoreTotal = Object.values(scoreBreakdown).reduce((sum, value) => sum + value, 0);
-  const isFinOps = text.includes('finops') || text.includes('cost');
-  const isSecurity = text.includes('zero trust') || text.includes('security');
 
-  const pilar = isFinOps
-    ? 'Hybrid Cloud y Public Cloud con criterio'
-    : isSecurity
+  const pilar = themes.includes('platform')
+    ? 'Platform Engineering e Internal Developer Platforms'
+    : themes.includes('resilience') || themes.includes('security')
       ? 'Resiliencia, observabilidad y AIOps'
-      : 'Diseño y modernización de infraestructuras enterprise y private cloud';
+      : themes.includes('finops') || themes.includes('cloud') || themes.includes('sovereignty')
+        ? 'Hybrid Cloud y Public Cloud con criterio'
+        : 'Diseño y modernización de infraestructuras enterprise y private cloud';
+
+  let porQueImporta = `“${hook}” señala decisiones de arquitectura con impacto en transformación, coste y operabilidad.`;
+  let ideaFuerte = context
+    ? `La lectura útil es conectar ${lowerFirst(context)} con una decisión concreta de plataforma y operating model.`
+    : 'La señal se puede traducir en una conversación ejecutiva sobre operabilidad, coste y resiliencia.';
+
+  if (themes.includes('finops')) {
+    porQueImporta = `“${hook}” toca una palanca ejecutiva de coste cloud, accountability y priorización de capacidad.`;
+    ideaFuerte = context
+      ? `La oportunidad está en convertir ${lowerFirst(context)} en una disciplina operable de FinOps y gobierno.`
+      : 'Coste marginal, ownership y decisiones de plataforma deben quedar conectados en el operating model.';
+  } else if (themes.includes('security')) {
+    porQueImporta = `“${hook}” afecta riesgo operativo, gobierno técnico y velocidad de cambio en estates complejos.`;
+    ideaFuerte = context
+      ? `La idea fuerte es pasar de controles aislados a seguridad operable basada en identidad, política y observabilidad: ${lowerFirst(context)}.`
+      : 'Seguridad, policy-as-code y operabilidad deben diseñarse como una sola conversación ejecutiva.';
+  } else if (themes.includes('platform')) {
+    porQueImporta = `“${hook}” impacta directamente en productividad interna, estandarización y escalabilidad de la plataforma.`;
+    ideaFuerte = context
+      ? `La lectura ejecutiva es usar ${lowerFirst(context)} para reducir fricción, excepciones y dependencia de conocimiento tribal.`
+      : 'Una plataforma útil no es más tooling: es menos fricción para equipos y más gobierno para la organización.';
+  } else if (themes.includes('resilience')) {
+    porQueImporta = `“${hook}” tiene implicaciones en resiliencia operativa, MTTR y capacidad de absorber cambio sin romper negocio.`;
+    ideaFuerte = context
+      ? `La conversación potente es cómo ${lowerFirst(context)} refuerza detección temprana, respuesta y aprendizaje operativo.`
+      : 'Resiliencia real aparece cuando observabilidad, operación y diseño de plataforma se piensan juntos.';
+  } else if (themes.includes('cloud')) {
+    porQueImporta = `“${hook}” obliga a revisar criterio cloud, dependencia de proveedor y modelo económico del estate.`;
+    ideaFuerte = context
+      ? `La idea fuerte es convertir ${lowerFirst(context)} en una decisión explícita sobre dónde correr, cómo gobernar y qué coste aceptar.`
+      : 'Hybrid y public cloud solo crean valor cuando el criterio técnico está ligado a coste, riesgo y soberanía.';
+  } else if (themes.includes('modernization')) {
+    porQueImporta = `“${hook}” apunta a decisiones de modernización que cambian complejidad operativa, resiliencia y deuda de infraestructura.`;
+    ideaFuerte = context
+      ? `La lectura más útil es usar ${lowerFirst(context)} para aterrizar una narrativa de modernización con impacto real en operaciones.`
+      : 'Modernizar no es mover tecnología: es rediseñar complejidad, fiabilidad y capacidad de evolución.';
+  }
 
   return {
     scoreBreakdown,
     scoreTotal,
-    porQueImporta: isFinOps
-      ? 'La eficiencia económica y la atribución de coste siguen siendo palancas ejecutivas para decidir arquitectura, ownership y operating model.'
-      : isSecurity
-        ? 'Las decisiones de seguridad y aislamiento afectan directamente a resiliencia, riesgo operativo y gobierno técnico.'
-        : 'La señal apunta a decisiones de arquitectura con impacto en transformación, coste y operabilidad.',
-    ideaFuerte: isFinOps
-      ? 'Relacionar coste marginal con decisiones de plataforma mejora gobierno y priorización.'
-      : isSecurity
-        ? 'Identity-based security as policy-as-code convierten control y velocidad en compatibles.'
-        : 'Las decisiones de plataforma ganan valor cuando se traducen en simplicidad operativa y resiliencia.',
+    porQueImporta,
+    ideaFuerte,
     pilar,
   };
 }
